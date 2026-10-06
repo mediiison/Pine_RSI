@@ -1,0 +1,1297 @@
+//@version=5
+//
+indicator('Ultimate RSI', shorttitle='Ultimate RSI', overlay=true)
+
+// RSI Oscillator Chart ════════════════════════════════════════════════════════
+// ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+ersi = input.float(70, 'Price 1', minval=0, step=5, group = "RSI Price Prediction")
+ob = input.float(50, 'Price 2', minval=0, step=5, group = "RSI Price Prediction")
+os = input.float(30, 'Price 3', minval=0, step=5, group = "RSI Price Prediction")
+pan1 = input(true, 'Show Price Prediction Panel', group = "RSI Price Prediction")
+off = input.int(35, '  Panel Position Offset', minval=0, group = "RSI Price Prediction")
+dec = input.int(4, 'Decimals', minval=0, maxval=10, group = "RSI Price Prediction")
+bg = input(false, 'Invisible Background', group = "RSI Price Prediction")
+
+// rsiUpperBand = hline(70, "RSI Upper Band", color=#787B86)
+// // hline(50, "RSI Middle Band", color=color.new(#787B86, 50))
+// rsiLowerBand = hline(30, "RSI Lower Band", color=#787B86)
+// fill(rsiUpperBand, rsiLowerBand, color=color.new(#b2b5be,92), title="RSI Background Fill", editable=true)
+
+////////////////////////////////////////////////////////////////////////////////ADVANCED RSI ///////
+// Global variables
+
+// -- Divergence data
+var line [] g_PossibleDivergenceLinesPlotted = array.new_line()
+
+var float [] g_priceArrayBull = array.new_float()
+var float [] g_rsiArrayBull   = array.new_float()
+var int   [] g_posArrayBull   = array.new_int()
+
+var float [] g_priceArrayBear = array.new_float()
+var float [] g_rsiArrayBear   = array.new_float()
+var int   [] g_posArrayBear   = array.new_int()
+
+//-- Support/Resistance lines data
+var line g_ResistanceLine = na
+var line g_SupportLine   = na
+
+var float [] g_rsiArraySupportLine = array.new_float()
+var int   [] g_posArraySupportLine = array.new_int()
+
+var float [] g_rsiArrayResistanceLine = array.new_float()
+var int   [] g_posArrayResistanceLine = array.new_int()
+
+// -- Bull/Bear confirmation zone data
+int NO_CTRL_ZONE   = 0
+int BULL_CTRL_ZONE = 1
+int BEAR_CTRL_ZONE = 2
+
+var int g_BullNumCandles = 0
+var int g_BearNumCandles = 0
+
+var int CTRL_ZONE_STATE = NO_CTRL_ZONE
+
+// -- Bull/Bear zone table price
+var tblGlobal = table.new(position = position.top_right, columns = 4, rows = 2, bgcolor = color.rgb(80, 80, 80, 80), border_width = 1)
+
+// -- Helper to reduce the number of alerts
+var int g_LastLowRegDivBarIndex = 0
+var int g_LastLowHidDivBarIndex = 0
+
+var int g_LastHighRegDivBarIndex = 0
+var int g_LastHighHidDivBarIndex = 0
+
+////////////////////////////////////////////////////////////////////////////////
+// General help functions
+
+// Clamp a value between two bounds
+//  [input]     v: value to be clamped
+//  [input]     min: lower band
+//  [input]     max: upper band
+//  [return]    the clomped value
+Clamp(v, min, max) =>
+   v > max ? max : v < min ? min : v
+
+// Check if a value is between two givens bound
+//  [input]     value: the value to be checked
+//  [input]     min: lower bound
+//  [input]     max: upper bound
+//  [return]    true if it between bound, false otherwise
+InRange(value, min, max) =>
+    min <= value and value <= max
+
+// Interpolate between two values
+//  [input]     v0: start value
+//  [input]     v1: end value
+//  [input]     t: amount of interpolation [0.0 to 1.0]
+//  [return]    if t = 0 => v0 else if t = 1 => v1 otherwise the amount of v0 and v1 for t
+Lerp(v0, v1, t) =>
+    float v = Clamp(t, 0.0, 1.0)
+    (1 - v) * v0 + v * v1
+
+// Round a value to a given number of decimals
+//  [input]     value: the value to round
+//  [input]     decimals: number of decimals
+//  [return]    the value rounded
+Round(value, decimals) =>
+    float v = math.pow(10, decimals)
+    math.round(math.abs(value) * v) / (v * math.sign(value))
+
+// Calculate the current RMA of the given value
+//  [input]     value: last series value
+//  [input]     rma: last RMA calculated value
+//  [input]     length: series length, used to calculate alpha
+//  [return]    RMA of the value
+RunningMovingAverage(value, rma, length) =>
+    float alpha = 1.0 / length
+    alpha * value + (1.0 - alpha) * rma
+
+// Interpolate between two colors. It makes use of "Lerp" function
+//  [input]     c1: first color
+//  [input]     c2: second color
+//  [input]     p: amount of interpolation [0.0 to 1.0]
+//  [return]    the interpolated color
+ColorInterpolation(c1, c2, p) =>
+    float r = Lerp(color.r(c1), color.r(c2), p)
+    float g = Lerp(color.g(c1), color.g(c2), p)
+    float b = Lerp(color.b(c1), color.b(c2), p)
+    float t = Lerp(color.t(c1), color.t(c2), p)
+    color.rgb(r, g, b, t)
+
+////////////////////////////////////////////////////////////////////////////////
+// TradingView help function
+
+// Show a label on the chart
+//  [input]     xPos: horizontal position on the chart
+//  [input]     yPos: vertical position on the chart
+//  [input]     txt: text to show
+//  [input]     crl: color of the text
+//  [input]     stl: style of the label
+//  [input]     align: text alignment
+ShowLabel(xPos, yPos, txt, clr = color.white, stl = label.style_none, align = text.align_right) =>
+    label lbl = label.new(xPos, yPos, txt, textcolor = clr, color = color.rgb(0,0,0,100), style = stl, textalign = align)
+    label.delete(lbl[1])
+
+// Get the RSI color for plotting. For RSI under 0.5 it will interpolate
+// between startColor and middleColor. For RSI above 0.5 it will interpolate
+// between middleColor and endColor.
+//  [input]     rsi: the current RSI value (between 0.0 and 1.0)
+//  [input]     startColor: first color to be interpolated
+//  [input]     middleColor: second color to be interpolated
+//  [input]     endColor: last color to be interpolated
+//  [input]     fullInterpolation: interpolate between the three colors or not
+//  [return]    if fullInterpolation is true the interpolation between all the colors, otherwise middleColor
+RsiColor(rsi, startColor, middleColor, endColor, fullInterpolation) =>
+    if (fullInterpolation)
+        if rsi < 0.5
+            ColorInterpolation(startColor, middleColor, (rsi - 0.0) * 2.0)
+        else
+            ColorInterpolation(middleColor, endColor, (rsi - 0.5) * 2.0)
+    else
+        middleColor
+
+// Calculate the moving average for the given source, length and type.
+// If the type is not one of the defined "na" it will be returned.
+//  [input]     source: data for the calculation
+//  [input]     length: look-back period
+//  [input]     type: moving average type [RMA, SAM, EMA, ATR, VWMA]
+//  [return]    the calculated moving average or "na" if type unknown
+CalculateMovingAverage(source, length, type) =>
+    switch type
+        "ATR"   => ta.atr(length)
+        "RMA"   => ta.rma(source, length)
+        "SMA"   => ta.sma(source, length)
+        "EMA"   => ta.ema(source, length)
+        "VWMA"  => ta.vwma(source, length)
+        => na
+
+// Convert string source series to series
+//  [input]     type: the source type [close, open, high, low]
+//  [return]    the source itself or "na" if type unknown
+GetSource(type) =>
+    switch type
+        "close" => close
+        "open"  => open
+        "high"  => high
+        "low"   => low
+        => na
+
+// Convert string line style to pine script enumerator
+// [input]  style: style of the line [solid, dotted, ...]
+// [return] The line style of "na" if unknown style
+GetLineStyle(style) =>
+    switch style
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        "Solid"  => line.style_solid
+        => na
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Indicators help function
+
+// Calculate the RSI values of given source and length
+//  [input]     source: data for the calculation
+//  [input]     length: look-back period
+//  [input]     type: Cutler RSI or Wilder
+//  [return]    the RSI value
+CalculateRSI(source, length, type) =>
+    float u = math.max(source[0] - source[1], 0)
+    float d = math.max(source[1] - source[0], 0)
+
+    float upChange   = 0.0
+    float downChange = 0.0
+
+    if type == "Wilder"
+        upChange   := ta.rma(u, length)
+        downChange := ta.rma(d, length)
+    else
+        upChange   := ta.sma(u, length)
+        downChange := ta.sma(d, length)
+
+
+    downChange == 0 ? 100 : upChange == 0 ? 0 : 100 - (100 / (1 + upChange / downChange))
+
+// Calculate the Bollinger Bands values of given source and length
+//  [input]     source: data for the calculation
+//  [input]     length: look-back period
+//  [input]     mult: multiplier
+//  [return]    [upper band, middle band, lower band]
+CalculateBollingerBands(source, length, mult) =>
+    float basis = ta.sma(source, length)
+    float dev = mult * ta.stdev(source, length)
+
+    float upperBandVal = basis + dev
+    float middleBandVal = basis
+    float lowerBandVal = basis - dev
+
+    [upperBandVal, middleBandVal, lowerBandVal]
+
+////////////////////////////////////////////////////////////////////////////////
+// Support/resistance help function
+
+// Given two points, get the factors of the line between the two points
+//  Ax + By + C = 0
+//  [input]     lx1: line first x coordinate
+//  [input]     ly1: line first y coordinate
+//  [input]     lx2: line second x coordinate
+//  [input]     ly2: line second y coordinate
+//  [return]    the line factors [a, b, c]
+GetLineFactors(lx1, ly1, lx2, ly2) =>
+    float a = ly1 - ly2
+    float b = lx2 - lx1
+    float c = (lx1 - lx2) * ly1 + (ly2 - ly1) * lx1
+
+    [a, b, c]
+
+// Get the distance from a point to given line
+//  [input]     lx1: line first x coordinate
+//  [input]     ly1: line first y coordinate
+//  [input]     lx2: line second x coordinate
+//  [input]     ly2: line second y coordinate
+//  [input]     px: point x coordinate to check
+//  [input]     py: point y coordinate to check
+//  [return]    the distance to the line
+DistanceToLine(lx1, ly1, lx2, ly2, px, py) =>
+    [a, b, c] = GetLineFactors(lx1, ly1, lx2, ly2)
+
+    float x = a * px + b * py + c
+    float y = math.sqrt(a * a + b * b)
+
+    x / y
+
+// Given a line and X coordinate return the Y coordinate value
+//  [input]     lx1: line first x coordinate
+//  [input]     ly1: line first y coordinate
+//  [input]     lx2: line second x coordinate
+//  [input]     ly2: line second y coordinate
+//  [input]     px: point x coordinate to find y
+//  [return]    the y coordinate value
+LineGetY(lx1, ly1, lx2, ly2, px) =>
+    [a, b, c] = GetLineFactors(lx1, ly1, lx2, ly2)
+    -(a * px + c) / b
+
+// Draw the last support line found. If no support line found, or the line
+// is broken, no line it will draw.
+//  [input]     rsiArray: array list with the lows
+//  [input]     posArray: array list with the lows positions
+//  [input]     distanceThreshold: distance from the line to the low
+//  [input]     minTouchPoints: number of points that have to be around the line
+//  [input]     currentRsi: current value of the RSI to check if the trend is broken
+//  [input]     clr: line color
+//  [input]     style: style of the line [solid, dashed, etc]
+//  [input]     width: line width
+//  [return]    the drawn line
+DrawSupportLine(rsiArray, posArray, distanceThreshold, minTouchPoints, currentRsi, clr, style, width) =>
+    line l = na
+    int arrayLen = array.size(posArray)
+
+    int x1 = array.get(posArray, 0)
+    float y1 = array.get(rsiArray, 0)
+
+    int x2 = array.get(posArray, arrayLen - 1)
+    float y2 = array.get(rsiArray, arrayLen - 1)
+
+    int endIndex = arrayLen - 2
+    int numTouchPoints = 2
+
+    while(endIndex > 0)
+        int x = array.get(posArray, endIndex)
+        float y = array.get(rsiArray, endIndex)
+
+        float d = DistanceToLine(x2, y2, x1, y1, x, y)
+        float absD = math.abs(d)
+
+        if d < 0 and absD > distanceThreshold
+            x2 := array.get(posArray, endIndex)
+            y2 := array.get(rsiArray, endIndex)
+            numTouchPoints := 2
+        else if absD <= distanceThreshold
+            numTouchPoints := numTouchPoints + 1
+
+        endIndex := endIndex - 1
+
+    float d = DistanceToLine(x2, y2, x1, y1, bar_index, currentRsi)
+    float absD = math.abs(d)
+
+    bool ok1 = (numTouchPoints >= math.min(minTouchPoints, arrayLen)) or (minTouchPoints == 2)
+    bool ok2 = (d >= 0) or (d < 0 and absD <= distanceThreshold)
+
+    if ok1 and ok2
+        float py2 = LineGetY(x2, y2, x1, y1, x2 - 5)
+        float py1 = LineGetY(x2, y2, x1, y1, bar_index + 5)
+        l := line.new(x2 - 5, py2 - 1, bar_index + 5, py1 - 1, color = clr, style = GetLineStyle(style), width = width)
+
+    l
+
+// Draw the last resistance line found. If no resistance line found, or the line
+// is broken, no line it will draw.
+//  [input]     rsiArray: array list with the lows
+//  [input]     posArray: array list with the lows positions
+//  [input]     distanceThreshold: distance from the line to the low
+//  [input]     minTouchPoints: number of points that have to be around the line
+//  [input]     currentRsi: current value of the RSI to check if the trend is broken
+//  [input]     clr: line color
+//  [input]     style: style of the line [solid, dashed, etc]
+//  [input]     width: line width
+//  [return]    the drawn line
+DrawResistanceLine(rsiArray, posArray, distanceThreshold, minTouchPoints, currentRsi, clr, style, width) =>
+    line l = na
+    int arrayLen = array.size(posArray)
+
+    int x1 = array.get(posArray, 0)
+    float y1 = array.get(rsiArray, 0)
+
+    int x2 = array.get(posArray, arrayLen - 1)
+    float y2 = array.get(rsiArray, arrayLen - 1)
+
+    int endIndex = arrayLen - 2
+    int numTouchPoints = 2
+
+    while(endIndex > 0)
+        int x = array.get(posArray, endIndex)
+        float y = array.get(rsiArray, endIndex)
+
+        float d = DistanceToLine(x2, y2, x1, y1, x, y)
+        if d > distanceThreshold
+            x2 := array.get(posArray, endIndex)
+            y2 := array.get(rsiArray, endIndex)
+            numTouchPoints := 2
+        else
+            numTouchPoints := numTouchPoints + 1
+
+        endIndex := endIndex - 1
+
+    float d = DistanceToLine(x2, y2, x1, y1, bar_index, currentRsi)
+
+    bool ok1 = (numTouchPoints >= math.min(minTouchPoints, arrayLen)) or (minTouchPoints == 2)
+    bool ok2 = d <= distanceThreshold
+
+    if ok1 and ok2
+        float py2 = LineGetY(x2, y2, x1, y1, x2 - 5)
+        float py1 = LineGetY(x2, y2, x1, y1, bar_index + 5)
+        l := line.new(x2 - 5, py2 + 1, bar_index + 5, py1 + 1, color = clr, style = GetLineStyle(style), width = width)
+
+    l
+
+////////////////////////////////////////////////////////////////////////////////
+// Divergences help function
+
+// Get a list with the regular bullish divergences found from the last low.
+//  [input]     priceArray: local lows price
+//  [input]     rsiArray: local lows RSI values
+//  [input]     posArray: local lows position on the chart
+//  [input]     priceThreshold: price threshold, higher values more lines
+//  [input]     rsiThreshold: RSI threshold, higher values more lines
+//  [return]    tuple with current X divergence, current Y divergence, array of X pivots, array of Y pivots (if there are no pivots, no divergences)
+GetBullishRegularDivergence(priceArray, rsiArray, posArray, priceThreshold, rsiThreshold) =>
+    float [] yPos = array.new_float()
+    int   [] xPos = array.new_int()
+
+    float currentPrice = array.get(priceArray, 0)
+    float currentRsi = array.get(rsiArray, 0)
+    int currentPos = array.get(posArray, 0)
+
+    for i = 1 to array.size(posArray) - 1
+        float prevPrice = array.get(priceArray, i)
+        float prevRsi = array.get(rsiArray, i)
+        int prevPos = array.get(posArray, i)
+
+        bool regDiv = currentPrice < prevPrice and currentRsi > prevRsi
+        float eqPrice = prevPrice - ((prevPrice - currentPrice) * priceThreshold)
+        float eqRsi = prevRsi + ((currentRsi - prevRsi) * rsiThreshold)
+
+        for j = 1 to (i > 1 and regDiv ? i - 1 : na)
+            float r = array.get(rsiArray, j)
+            float p = array.get(priceArray, j)
+
+            regDiv := regDiv and p > currentPrice and p > eqPrice
+            regDiv := regDiv and r > eqRsi
+
+            if not regDiv
+                break
+
+        if regDiv
+            array.push(yPos, prevRsi)
+            array.push(xPos, prevPos)
+
+    [currentPos, currentRsi, xPos, yPos]
+
+// Get a list with the hidden bullish divergences found from the last low.
+//  [input]     priceArray: local lows price
+//  [input]     rsiArray: local lows RSI values
+//  [input]     posArray: local lows position on the chart
+//  [input]     priceThreshold: price threshold, higher values more lines
+//  [input]     rsiThreshold: RSI threshold, higher values more lines
+//  [return]    tuple with current X divergence, current Y divergence, array of X pivots, array of Y pivots (if there are no pivots, no divergences)
+GetBullishHiddenDivergence(priceArray, rsiArray, posArray, priceThreshold, rsiThreshold) =>
+    float [] yPos = array.new_float()
+    int   [] xPos = array.new_int()
+
+    float currentPrice = array.get(priceArray, 0)
+    float currentRsi = array.get(rsiArray, 0)
+    int currentPos = array.get(posArray, 0)
+
+    for i = 1 to array.size(posArray) - 1
+        float prevPrice = array.get(priceArray, i)
+        float prevRsi = array.get(rsiArray, i)
+        int prevPos = array.get(posArray, i)
+
+        bool hidDiv = currentPrice > prevPrice and currentRsi < prevRsi
+        float eqPrice = prevPrice - ((currentPrice - prevPrice) * priceThreshold)
+        float eqRsi = prevRsi - ((prevRsi - currentRsi) * rsiThreshold)
+
+        for j = 1 to (i > 1 and hidDiv ? i - 1 : na)
+            float r = array.get(rsiArray, j)
+            float p = array.get(priceArray, j)
+
+            hidDiv := hidDiv and p > currentPrice and p > eqPrice
+            hidDiv := hidDiv and r > eqRsi
+
+            if not hidDiv
+                break
+
+        if hidDiv
+            array.push(yPos, prevRsi)
+            array.push(xPos, prevPos)
+
+    [currentPos, currentRsi, xPos, yPos]
+
+// Get a list with the regular bearish divergences found from the last high.
+//  [input]     priceArray: local highs price
+//  [input]     rsiArray: local highs RSI values
+//  [input]     posArray: local highs position on the chart
+//  [input]     priceThreshold: price threshold, higher values more lines
+//  [input]     rsiThreshold: RSI threshold, higher values more lines
+//  [return]    tuple with current X divergence, current Y divergence, array of X pivots, array of Y pivots (if there are no pivots, no divergences)
+GetBearishRegularDivergence(priceArray, rsiArray, posArray, priceThreshold, rsiThreshold) =>
+    float [] yPos = array.new_float()
+    int   [] xPos = array.new_int()
+
+    float currentPrice = array.get(priceArray, 0)
+    float currentRsi = array.get(rsiArray, 0)
+    int currentPos = array.get(posArray, 0)
+
+    for i = 1 to array.size(posArray) - 1
+        float prevPrice = array.get(priceArray, i)
+        float prevRsi = array.get(rsiArray, i)
+        int prevPos = array.get(posArray, i)
+
+        bool regDiv = currentPrice > prevPrice and currentRsi < prevRsi
+        float eqPrice = prevPrice + ((currentPrice - prevPrice) * priceThreshold)
+        float eqRsi = prevRsi - ((prevRsi - currentRsi) * rsiThreshold)
+
+        for j = 1 to (i > 1 and regDiv ? i - 1 : na)
+            float r = array.get(rsiArray, j)
+            float p = array.get(priceArray, j)
+
+            regDiv := regDiv and p < currentPrice and p < eqPrice
+            regDiv := regDiv and r < eqRsi
+
+            if not regDiv
+                break
+
+        if regDiv
+            array.push(yPos, prevRsi)
+            array.push(xPos, prevPos)
+
+    [currentPos, currentRsi, xPos, yPos]
+
+// Get a list with the hidden bearish divergences found from the last high.
+//  [input]     priceArray: local highs price
+//  [input]     rsiArray: local highs RSI values
+//  [input]     posArray: local highs position on the chart
+//  [input]     priceThreshold: price threshold, higher values more lines
+//  [input]     rsiThreshold: RSI threshold, higher values more lines
+//  [return]    tuple with current X divergence, current Y divergence, array of X pivots, array of Y pivots (if there are no pivots, no divergences)
+GetBearishHiddenDivergence(priceArray, rsiArray, posArray, priceThreshold, rsiThreshold) =>
+    float [] yPos = array.new_float()
+    int   [] xPos = array.new_int()
+
+    float currentPrice = array.get(priceArray, 0)
+    float currentRsi = array.get(rsiArray, 0)
+    int currentPos = array.get(posArray, 0)
+
+    for i = 1 to array.size(posArray) - 1
+        float prevPrice = array.get(priceArray, i)
+        float prevRsi = array.get(rsiArray, i)
+        int prevPos = array.get(posArray, i)
+
+        bool hidDiv = currentPrice < prevPrice and currentRsi > prevRsi
+        float eqPrice = prevPrice + ((prevPrice - currentPrice) * priceThreshold)
+        float eqRsi = prevRsi + ((currentRsi - prevRsi) * rsiThreshold)
+
+        for j = 1 to (i > 1 and hidDiv ? i - 1 : na)
+            float r = array.get(rsiArray, j)
+            float p = array.get(priceArray, j)
+
+            hidDiv := hidDiv and p < currentPrice and p < eqPrice
+            hidDiv := hidDiv and r < eqRsi
+
+            if not hidDiv
+                break
+
+        if hidDiv
+            array.push(yPos, prevRsi)
+            array.push(xPos, prevPos)
+
+    [currentPos, currentRsi, xPos, yPos]
+
+// Show divergences
+//  [input]     x: current X position of the last low/high
+//  [input]     y: current Y position of the last low/high
+//  [input]     xA: list of X position that confirm the divergence of the last low/high
+//  [input]     xY: list of Y position that confirm the divergence of the last low/high
+//  [input]     drawType: Drive a line or a label for the divergence ["Lines", "Labels"]
+//  [input]     txt: text the the current divergence (only for label)
+//  [input]     color: color of the line or label
+//  [input]     offset: Y distance from the current position
+//  [input]     lineThickness: width of the line
+ShowDivergence(x, y, xA, yA, drawType, txt, color, offset, lineThickness) =>
+    if false and array.size(xA) > 0
+        for i = 0 to array.size(xA) - 1
+            if drawType == "Lines"
+                line.new(x, y + offset, array.get(xA, i), array.get(yA, i) + offset, color = color, style = line.style_solid, width = lineThickness)
+                continue
+            else if drawType == "Labels"
+                label.new(x, y + offset, txt, textcolor = color, style = label.style_none)
+                break
+
+////////////////////////////////////////////////////////////////////////////////
+// Price prediction help function
+
+// Get the components for computed the price prediction of and RSI value
+//  [input]     source: data for the calculation
+//  [input]     length: look-back period
+//  [input]     type: Cutler RSI or Wilder
+//  [return]    RMA of the positive changed, RMA of the negative change
+GetPricePredictionComponents(source, length, type) =>
+    float u = math.max(source[0] - source[1], 0)
+    float d = math.max(source[1] - source[0], 0)
+
+    float upChange   = 0.0
+    float downChange = 0.0
+
+    if type == "Wilder"
+        upChange   := ta.rma(u, length)
+        downChange := ta.rma(d, length)
+    else
+        upChange   := u
+        downChange := d
+
+    [upChange, downChange]
+
+// Get the price prediction for a given RSI value
+//  [input]     targetRsi: target RSI value
+//  [input]     currentRsi: current RSI value
+//  [input]     currentPrice: price of the bar
+//  [input]     upChange: RMA of the up price changes
+//  [input]     downChange: RMA of the down price changes
+//  [input]     length: number of look-back bars
+//  [return]    the price prediction
+GetPricePredictionWilder(targetRsi, currentRsi, currentPrice, upChange, downChange, length) =>
+    float alpha = 1.0 / length
+    rs = math.abs(targetRsi / (targetRsi - 100))
+
+    if currentRsi < targetRsi
+        float u = RunningMovingAverage(0, downChange, length) * rs
+        currentPrice + (alpha * upChange - upChange + u) / alpha
+    else if currentRsi > targetRsi
+        float d = RunningMovingAverage(0, upChange, length) / rs
+        currentPrice - (alpha * downChange - downChange + d) / alpha
+    else
+        close
+
+// Get the price prediction for a given RSI value
+//  [input]     targetRsi: target RSI value
+//  [input]     currentRsi: current RSI value
+//  [input]     currentPrice: price of the bar
+//  [input]     upChange: Up price changes
+//  [input]     downChange: Down price changes
+//  [input]     length: number of look-back bars
+//  [return]    the price prediction
+GetPricePredictionCutler(targetRsi, currentRsi, currentPrice, upChange, downChange, length) =>
+    float rs = math.abs(targetRsi / (targetRsi - 100))
+    float sd = math.sum(downChange, length - 1)
+    float su = math.sum(upChange, length - 1)
+
+    if currentRsi < targetRsi
+        float u = sd * rs
+        currentPrice + u - su
+    else if currentRsi > targetRsi
+        float d = su / rs
+        currentPrice - d - sd
+    else
+        close
+
+// Get the price prediction for a given RSI value
+//  [input]     targetRsi: target RSI value
+//  [input]     currentRsi: current RSI value
+//  [input]     currentPrice: price of the bar
+//  [input]     upChange: Up price changes (RMA fow Wilder)
+//  [input]     downChange: Down price changes (RMA fow Wilder)
+//  [input]     length: number of look-back bars
+//  [input]     type: RSI type [Wilder, Cutler]
+//  [return]    the price prediction
+GetPricePrediction(targetRsi, currentRsi, currentPrice, upChange, downChange, length, type) =>
+    if type == "Wilder"
+        GetPricePredictionWilder(targetRsi, currentRsi, currentPrice, upChange, downChange, length)
+    else
+        GetPricePredictionCutler(targetRsi, currentRsi, currentPrice, upChange, downChange, length)
+
+////////////////////////////////////////////////////////////////////////////////
+// Stoch RSI help function
+
+// Get stoch RSI reversal prediction
+//  [input]     periodK: number of lookback bars for computing K
+//  [input]     smoothK: number of lookback values for smoothing K value
+//  [input]     periodD: number of lookback bars for computing D
+//  [input]     rsiSeries: RSI serie
+//  [return]    The forcasted RSI
+ForecastRSIReversalDynamic(periodK, smoothK, periodD, rsiSeries) =>
+    float stoch = ta.stoch(rsiSeries, rsiSeries, rsiSeries, periodK)
+    stoch := stoch * 0.01
+
+    float k = ta.sma(stoch, smoothK)
+    float d = ta.sma(k, periodD)
+
+    float h = ta.highest(rsiSeries, periodK)
+    float l = ta.lowest(rsiSeries, periodK)
+
+    float kSum = math.sum(stoch[1], smoothK - 1)
+    float forcastedStoch = (d * smoothK) - kSum
+
+    forcastedStoch * (h - l) + l
+
+////////////////////////////////////////////////////////////////////////////////
+// User inputs
+//-- RSI settings (source, length, upper/lower band, colors, etc)
+rsiType                     = input.string( "Wilder", title = "Type", options = ["Wilder", "Cutler"], group = "RSI settings")
+rsiLen                      = input.int(14, minval = 1, title = "Length", group = "RSI settings")
+rsiSrc                      = input.string("close", title = "Source", options = [ "close", "open", "high", "low" ], group = "RSI settings")
+
+upperBand                   = 70
+lowerBand                   = 30
+
+rsiLineThickness            = input.int(1, minval = 1, maxval = 4, title = "Line thickness", group = "RSI settings")
+
+upperBandColor              = color.red
+
+lowerBandColor              = color.green
+
+rsiColorInterpolation       = input.bool(true,                          title = "Color interpolation |",    group = "RSI settings", inline = "color")
+rsiMainColor                = input.color(color.rgb(49, 121, 245, 0),   title = "RSI line color",           group = "RSI settings", inline = "color")
+
+//-- RSI smooth, apply a smooth over RSI value, default: EMA of 1
+smoothLen                   = input.int(1, minval = 1,  title = "Length",                                               group = "RSI smooth")
+smoothType                  = input.string("EMA",       title = "Type",     options = [ "EMA", "SMA", "RMA", "VWMA" ],  group = "RSI smooth")
+
+//-- Show the RSI moving average, default: EMA of 21
+showRsiMA                   = input.bool(false,         title = "Show moving average",  group = "RSI moving average", inline = "mavg")
+rsiMAUptrendColor           = input.color(color.green,  title = "| Colors",             group = "RSI moving average", inline = "mavg")
+rsiMADowntrendColor         = input.color(color.red,    title = "",                     group = "RSI moving average", inline = "mavg")
+
+movAvgLen                   = input.int(21, minval = 1,             title = "Length",                                                       group = "RSI moving average")
+movAvgType                  = input.string("EMA",                   title = "Type",             options = [ "EMA", "SMA", "RMA", "VWMA" ],  group = "RSI moving average")
+movAvgLineThickness         = input.int(1, minval = 1, maxval = 4,  title = "Line thickness",                                               group = "RSI moving average")
+
+
+
+//-- Divergence section, source for bullish and bearish, look-back and forward perior, etc
+blSource                    = input.string("close", title = "Bull price source", options = [ "close", "low" ],  group = "RSI Divergences")
+brSource                    = input.string("close", title = "Bear price source", options = [ "close", "high" ], group = "RSI Divergences")
+minMaxSource                = input.string("price", title = "Divergence source", options = [ "rsi", "price" ],  group = "RSI Divergences")
+
+pivotLeftBars               = input.int(3, minval = 1, title = "Low/High left bars",    group = "RSI Divergences")
+pivotRightBars              = input.int(3, minval = 1, title = "Low/High right bars",   group = "RSI Divergences")
+
+maxLookbackRange            = input.int(60, minval = 1,             title = "Maximum lookback bars",    group = "RSI Divergences")
+divLineThickness            = input.int(1, minval = 1, maxval = 4,  title = "Line thickness",           group = "RSI Divergences")
+
+priceMarginValue            = input.string("1", title = "Price threshold", options = ["0", "0.236", "0.382", "0.5", "0.618", "0.786", "1", "1.272", "1.618", "1.786", "2"], group = "RSI Divergences")
+rsiMarginValue              = input.string("1", title = "RSI threshold",   options = ["0", "0.236", "0.382", "0.5", "0.618", "0.786", "1", "1.272", "1.618", "1.786", "2"], group = "RSI Divergences")
+
+showRegularBullDiv          = input.bool(true,                         title = "Show regular bull divergence", group = "RSI Divergences", inline = "rbldiv")
+regularBullColor            = input.color(color.rgb(76, 175, 80, 0),    title = "",                             group = "RSI Divergences", inline = "rbldiv")
+
+showHiddenBullDiv           = input.bool(true,                         title = "Show hidden bull divergence",  group = "RSI Divergences", inline = "hbldiv")
+hiddenBullColor             = input.color(color.rgb(0, 188, 212, 0),    title = "",                             group = "RSI Divergences", inline = "hbldiv")
+
+showRegularBearDiv          = input.bool(true,         title = "Show regular bear divergence", group = "RSI Divergences", inline = "rbrdiv")
+regularBearColor            = input.color(color.red,    title = "",                             group = "RSI Divergences", inline = "rbrdiv")
+
+showHiddenBearDiv           = input.bool(true,         title = "Show hidden bear divergence",  group = "RSI Divergences", inline = "hbrdiv")
+hiddenBearColor             = input.color(color.orange, title = "",                             group = "RSI Divergences", inline = "hbrdiv")
+
+divDrawType                 = input.string("Labels",     title = "Show divergences as", options = [ "Lines", "Labels"],  group = "RSI Divergences")
+bullDivOffset               = input.int(10, minval = 1,  title = "Bullish draw offset",                                  group = "RSI Divergences")
+bearDivOffset               = input.int(10, minval = 1,  title = "Bearish draw offset",                                  group = "RSI Divergences")
+
+
+// -- Possible support/resistance lines
+srShowSupport               = input.bool(false,         title = "Show support line",    group = "Support/Resistance Lines", inline = "srsp")
+srSupportColor              = input.color(color.white,  title = "",                     group = "Support/Resistance Lines", inline = "srsp")
+
+srShowResistance            = input.bool(false,         title = "Show resistance line", group = "Support/Resistance Lines", inline = "srre")
+srResistanceColor           = input.color(color.white,  title = "",                     group = "Support/Resistance Lines", inline = "srre")
+
+srlookBack                  = input.int(5, minval = 2, maxval = 50, title = "Lookback lows/highs",  group = "Support/Resistance Lines")
+srThreshold                 = input.int(3, minval = 1, maxval = 10, title = "Distance threshold",   group = "Support/Resistance Lines")
+srTouchPoints               = input.int(2, minval = 2, maxval = 10, title = "Line touch points",    group = "Support/Resistance Lines")
+
+srPivotLeftBars             = input.int(5, minval = 1, title = "Low/High left bars",    group = "Support/Resistance Lines")
+srPivotRightBars            = input.int(3, minval = 1, title = "Low/High right bars",   group = "Support/Resistance Lines")
+
+stLineStyle                 = input.string("Dashed",                title = "Line style",   options = ["Solid", "Dashed", "Dotted"],    group = "Support/Resistance Lines")
+stLineWidth                 = input.int(1, minval = 1, maxval = 4,  title = "Line thickness",                                           group = "Support/Resistance Lines")
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Plot RSI and EMA
+
+float rsi = CalculateRSI(GetSource(rsiSrc), rsiLen, rsiType)
+float smoothRsi = CalculateMovingAverage(rsi, smoothLen, smoothType)
+
+color rsiColor = RsiColor(smoothRsi * 0.01, lowerBandColor, rsiMainColor, upperBandColor, rsiColorInterpolation)
+// plot(smoothRsi, title = "RSI", style = plot.style_line, color = rsiColor, linewidth = rsiLineThickness, editable = false)
+
+float emaVal = showRsiMA ? CalculateMovingAverage(smoothRsi, movAvgLen, movAvgType) : na
+//plot(emaVal, title = "EMA", style = plot.style_line, color = emaVal > emaVal[1] ? rsiMAUptrendColor : rsiMADowntrendColor, linewidth = movAvgLineThickness, editable = false)
+
+
+
+/////////////////
+////////////////////////////////////////////////////////////////
+// RSI data for finding divergences
+
+float priceMargin = str.tonumber(priceMarginValue)
+float rsiMargin   = str.tonumber(rsiMarginValue)
+
+float bullSource = blSource == "low"  ? low  : close
+float bearSource = brSource == "high" ? high : close
+
+float bullRsi = CalculateMovingAverage(CalculateRSI(bullSource, rsiLen, rsiType), smoothLen, smoothType)
+float bearRsi = CalculateMovingAverage(CalculateRSI(bearSource, rsiLen, rsiType), smoothLen, smoothType)
+
+bool phFound = not na(ta.pivothigh(minMaxSource == "price" ? bearSource : bearRsi, pivotLeftBars, pivotRightBars))
+bool plFound = not na(ta.pivotlow(minMaxSource == "price" ? bullSource : bullRsi, pivotLeftBars, pivotRightBars))
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Lows for bullish divergences
+
+float pr = ta.valuewhen(plFound, bullSource[pivotRightBars], 0)
+float rs = ta.valuewhen(plFound, bullRsi[pivotRightBars], 0)
+int ps   = ta.valuewhen(plFound, bar_index[pivotRightBars], 0)
+
+if plFound
+    array.insert(g_priceArrayBull, 0, pr)
+    array.insert(g_posArrayBull, 0, ps)
+    array.insert(g_rsiArrayBull, 0, rs)
+
+////////////////////////////////////////////////////////////////////////////////
+// Highs for bearish divergences
+
+pr := ta.valuewhen(phFound, bearSource[pivotRightBars], 0)
+ps := ta.valuewhen(phFound, bar_index[pivotRightBars], 0)
+rs := ta.valuewhen(phFound, bearRsi[pivotRightBars], 0)
+
+if phFound
+    array.insert(g_priceArrayBear, 0, pr)
+    array.insert(g_posArrayBear, 0, ps)
+    array.insert(g_rsiArrayBear, 0, rs)
+
+////////////////////////////////////////////////////////////////////////////////
+// Remove extra lows/highs data from the arrays (the oldest one)
+
+if array.size(g_posArrayBull) > 1
+    int x0 = array.get(g_posArrayBull, 0)
+    int x1 = array.get(g_posArrayBull, array.size(g_posArrayBull) - 1)
+
+    if not InRange(math.abs(x0 - x1), 1, maxLookbackRange)
+        array.pop(g_priceArrayBull)
+        array.pop(g_rsiArrayBull)
+        array.pop(g_posArrayBull)
+
+if array.size(g_posArrayBear) > 1
+    int x0 = array.get(g_posArrayBear, 0)
+    int x1 = array.get(g_posArrayBear, array.size(g_posArrayBear) - 1)
+
+    if not InRange(math.abs(x0 - x1), 1, maxLookbackRange)
+        array.pop(g_priceArrayBear)
+        array.pop(g_rsiArrayBear)
+        array.pop(g_posArrayBear)
+
+////////////////////////////////////////////////////////////////////////////////
+// Plot bullish/bearish divergences
+
+output_long1 = 0
+output_short1 = 0
+
+if plFound
+    if showRegularBullDiv and array.size(g_priceArrayBull) > 1
+        [x, y, xA, yA] = GetBullishRegularDivergence(g_priceArrayBull, g_rsiArrayBull, g_posArrayBull, priceMargin, rsiMargin)
+        ShowDivergence(x, y, xA, yA, divDrawType, "▲", regularBullColor, -bullDivOffset, divLineThickness)
+
+    if showHiddenBullDiv and array.size(g_priceArrayBull) > 1
+        [x, y, xA, yA] = GetBullishHiddenDivergence(g_priceArrayBull, g_rsiArrayBull, g_posArrayBull, priceMargin, rsiMargin)
+        ShowDivergence(x, y, xA, yA, divDrawType, "△", hiddenBullColor, -bullDivOffset, divLineThickness)
+
+if phFound
+    if showRegularBearDiv and array.size(g_priceArrayBear) > 1
+        [x, y, xA, yA] = GetBearishRegularDivergence(g_priceArrayBear, g_rsiArrayBear, g_posArrayBear, priceMargin, rsiMargin)
+        ShowDivergence(x, y, xA, yA, divDrawType, "▼", regularBearColor, bearDivOffset, divLineThickness)
+        
+
+    if showHiddenBearDiv and array.size(g_priceArrayBear) > 1
+        [x, y, xA, yA] = GetBearishHiddenDivergence(g_priceArrayBear, g_rsiArrayBear, g_posArrayBear, priceMargin, rsiMargin)
+        ShowDivergence(x, y, xA, yA, divDrawType, "▽", hiddenBearColor, bearDivOffset, divLineThickness)
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Remove all lines of possible divergences
+
+if array.size(g_PossibleDivergenceLinesPlotted) > 0
+    for i = 0 to array.size(g_PossibleDivergenceLinesPlotted) - 1
+        line.delete(array.get(g_PossibleDivergenceLinesPlotted, i))
+    array.clear(g_PossibleDivergenceLinesPlotted)
+
+////////////////////////////////////////////////////////////////////////////////
+// Plot possible bullish/bearish divergences
+
+int lowBarIndex = math.abs(ta.lowestbars(bullSource, pivotRightBars))
+if array.size(g_posArrayBull) > 0 and (showRegularBullDiv or showHiddenBullDiv)
+    if lowBarIndex != 0 and lowBarIndex != array.get(g_posArrayBull, 0)
+        array.insert(g_priceArrayBull, 0, bullSource[lowBarIndex])
+        array.insert(g_posArrayBull, 0, bar_index[lowBarIndex])
+        array.insert(g_rsiArrayBull, 0, bullRsi[lowBarIndex])
+
+        if showRegularBullDiv
+            [x, y, xA, yA] = GetBullishRegularDivergence(g_priceArrayBull, g_rsiArrayBull, g_posArrayBull, priceMargin,  rsiMargin)
+            
+            if array.size(xA) > 0 and lowBarIndex > g_LastLowRegDivBarIndex and (bar_index - lowBarIndex) == 1
+                g_LastLowRegDivBarIndex := lowBarIndex 
+                alert("Possible Bullish regular divergence detected", alert.freq_once_per_bar_close)
+
+            for i = 0 to array.size(xA) > 0 ? array.size(xA) - 1 : na
+                line l = line.new(x, y - 1, array.get(xA, i), array.get(yA, i) - 1, color = regularBullColor, style = line.style_dotted, width = divLineThickness)
+                array.push(g_PossibleDivergenceLinesPlotted, l)
+                output_long1 := 1
+
+        if showHiddenBullDiv
+            [x, y, xA, yA] = GetBullishHiddenDivergence(g_priceArrayBull, g_rsiArrayBull, g_posArrayBull, priceMargin, rsiMargin)
+
+            if array.size(xA) > 0 and lowBarIndex > g_LastLowHidDivBarIndex and (bar_index - lowBarIndex) == 1
+                g_LastLowHidDivBarIndex := lowBarIndex
+                alert("Possible Bullish hidden divergence detected", alert.freq_once_per_bar_close)      
+                
+            for i = 0 to array.size(xA) > 0 ? array.size(xA) - 1 : na
+                line l = line.new(x, y - 1, array.get(xA, i), array.get(yA, i) - 1, color = hiddenBullColor, style = line.style_dotted, width = divLineThickness)
+                array.push(g_PossibleDivergenceLinesPlotted, l)
+                output_long1 := 1
+
+        array.shift(g_priceArrayBull)
+        array.shift(g_rsiArrayBull)
+        array.shift(g_posArrayBull)
+
+int highBarIndex = math.abs(ta.highestbars(bearSource, pivotRightBars))
+if array.size(g_posArrayBear) > 0 and (showRegularBearDiv or showHiddenBearDiv)
+    if highBarIndex != 0 and highBarIndex != array.get(g_posArrayBear, 0)
+        array.insert(g_priceArrayBear, 0, bearSource[highBarIndex])
+        array.insert(g_posArrayBear, 0, bar_index[highBarIndex])
+        array.insert(g_rsiArrayBear, 0, bearRsi[highBarIndex])
+
+        if showRegularBearDiv
+            [x, y, xA, yA] = GetBearishRegularDivergence(g_priceArrayBear, g_rsiArrayBear, g_posArrayBear, priceMargin, rsiMargin)
+
+            if array.size(xA) > 0 and highBarIndex > g_LastHighRegDivBarIndex and (bar_index - highBarIndex) == 1
+                g_LastHighRegDivBarIndex := highBarIndex 
+                alert("Possible Bearish regular divergence detected", alert.freq_once_per_bar_close)
+
+
+            for i = 0 to array.size(xA) > 0 ? array.size(xA) - 1 : na
+                line l = line.new(x, y + 1, array.get(xA, i), array.get(yA, i) + 1, color = regularBearColor, style = line.style_dotted, width = divLineThickness)
+                array.push(g_PossibleDivergenceLinesPlotted, l)
+                output_short1 := 1
+                
+
+        if showHiddenBearDiv
+            [x, y, xA, yA] = GetBearishHiddenDivergence(g_priceArrayBear, g_rsiArrayBear, g_posArrayBear, priceMargin, rsiMargin)
+
+            if array.size(xA) > 0 and highBarIndex > g_LastHighHidDivBarIndex and (bar_index - highBarIndex) == 1
+                g_LastHighHidDivBarIndex := highBarIndex
+                alert("Possible Bearish hidden divergence detected", alert.freq_once_per_bar_close)      
+
+            for i = 0 to array.size(xA) > 0 ? array.size(xA) - 1 : na
+                line l = line.new(x, y + 1, array.get(xA, i), array.get(yA, i) + 1, color = hiddenBearColor, style = line.style_dotted, width = divLineThickness)
+                array.push(g_PossibleDivergenceLinesPlotted, l)
+                output_short1 := 1
+
+        array.shift(g_priceArrayBear)
+        array.shift(g_posArrayBear)
+        array.shift(g_rsiArrayBear)
+
+////////////////////////////////////////////////////////////////////////////////
+// Highs for resistance line
+
+bool phFoundResistance = not na(ta.pivothigh(smoothRsi, srPivotLeftBars, srPivotRightBars))
+bool plFoundSupport = not na(ta.pivotlow(smoothRsi, srPivotLeftBars, srPivotRightBars))
+
+ps := ta.valuewhen(phFoundResistance, bar_index[srPivotRightBars], 0)
+rs := ta.valuewhen(phFoundResistance, smoothRsi[srPivotRightBars], 0)
+
+if phFoundResistance
+    array.insert(g_posArrayResistanceLine, 0, ps)
+    array.insert(g_rsiArrayResistanceLine, 0, rs)
+
+if array.size(g_posArrayResistanceLine) > srlookBack
+    array.pop(g_posArrayResistanceLine)
+    array.pop(g_rsiArrayResistanceLine)
+
+////////////////////////////////////////////////////////////////////////////////
+// Lows for support line
+
+ps := ta.valuewhen(plFoundSupport, bar_index[srPivotRightBars], 0)
+rs := ta.valuewhen(plFoundSupport, smoothRsi[srPivotRightBars], 0)
+
+if plFoundSupport
+    array.insert(g_posArraySupportLine, 0, ps)
+    array.insert(g_rsiArraySupportLine, 0, rs)
+
+if array.size(g_posArraySupportLine) > srlookBack
+    array.pop(g_posArraySupportLine)
+    array.pop(g_rsiArraySupportLine)
+
+////////////////////////////////////////////////////////////////////////////////
+// Plot possible support/resistance lines
+
+line.delete(g_SupportLine)
+line.delete(g_ResistanceLine)
+
+if srShowSupport and array.size(g_posArraySupportLine) >= 2
+    g_SupportLine := DrawSupportLine(g_rsiArraySupportLine, g_posArraySupportLine, srThreshold, srTouchPoints, smoothRsi, srSupportColor, stLineStyle, stLineWidth)
+
+if srShowResistance and array.size(g_posArrayResistanceLine) >= 2
+    g_ResistanceLine := DrawResistanceLine(g_rsiArrayResistanceLine, g_posArrayResistanceLine, srThreshold, srTouchPoints, smoothRsi, srResistanceColor, stLineStyle, stLineWidth)
+
+////////////////////////////////////////////////////////////////////////////////
+
+
+
+//////// REGULAR RSI ////////
+
+
+
+
+
+
+src = close
+//Reverse RSI Functions
+reverse(Level) =>
+    x1 = (rsiLen - 1) * (ta.rma(math.max(nz(src[1], src) - src, 0), rsiLen) * Level / (100 - Level) - ta.rma(math.max(src - nz(src[1], src), 0), rsiLen))
+    x1 >= 0 ? src + x1 : src + x1 * (100 - Level) / Level
+
+//RSIEMA
+ma = ta.ema(rsi, movAvgLen)
+
+//Reverse RSI Price Level Calculations
+revma = reverse(ma)
+revob = reverse(ob)
+revos = reverse(os)
+reversi = reverse(ersi)
+
+
+//Reverse Reverse RSI
+rr(input) =>
+    alpha = 1 / rsiLen
+    up1 = ta.rma(math.max(ta.change(src), 0), rsiLen)
+    down1 = ta.rma(-math.min(ta.change(src), 0), rsiLen)
+    up = alpha * math.max(input - src[1], 0) + (1 - alpha) * nz(up1[1])
+    down = alpha * -math.min(input - src[1], 0) + (1 - alpha) * nz(down1[1])
+    rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - 100 / (1 + up / down)
+
+
+
+
+//Information Panel
+labelstyle = label.style_label_center
+labelstyle2 = label.style_label_down
+
+labelc = bg ? color.new(#b13f3f, 100) : color.new(#000000, 45)
+
+    
+//Offset 
+xp(offset) =>
+    time + math.round(ta.change(time) * offset)
+lable1(offset, P, T, s, color_PnL) =>
+    label PnL_Label = na
+    PnL_Label := label.new(xp(offset), P, text=T, color=color_PnL, textcolor=#b2b5be, style=s, yloc=yloc.price, xloc=xloc.bar_time, size=size.small)
+    label.delete(PnL_Label[1])
+
+ud()=>
+    if rsi < ma
+        "↑ MA"
+    else
+        "↓ MA"
+//Panel Plot
+
+
+if pan1
+    lable1(off,50, "RSI Cross " + ud() +  " Price : " + str.tostring(Round(revma,dec)) + '\n\n' + str.tostring(Round(ersi, dec)) + ' - Price 1: ' + str.tostring(Round(reversi, dec)) + '\n\n' + str.tostring(Round(ob, dec)) + ' - Price 2: ' + str.tostring(Round(revob, dec)) + '\n\n' + str.tostring(Round(os, dec)) + ' - Price 3: ' + str.tostring(Round(revos, dec)), labelstyle, labelc)
+
+
+
+// barcolor(output_long1 ? color.green : na)
+// barcolor(output_short1 ? color.red : na)
+
+length = input.int(7, "RSI Length")
+ma_length=input.int(4,"Moving Average Length")
+source = input.source(hl2)
+ma_select = input.string(title="Moving Average Type", defval="KAMA", options=["NONE","SMA", "EMA", "WMA", "HMA", "JMA", "KAMA"])
+color_bars=input.bool(false, "Color bars")
+i_fastAlpha = input.float(3, "KAMA's alpha (only for KAMA)", minval=0, step=0.5)
+rsi_val=math.min(100,math.max(-100,(ta.rsi(source, length) - 50) * 4 ))
+// plot(val)
+fastAlpha = 2.0 / (i_fastAlpha + 1)
+slowAlpha = 2.0 / (31)
+MA_selector(src, length) =>
+    ma = 0.0
+    if ma_select == "NONE"
+        ma:=src
+        ma
+    if ma_select == "SMA"
+        ma := ta.sma(src, length)
+        ma
+
+    if ma_select == "EMA"
+        ma := ta.ema(src, length)
+        ma
+
+    if ma_select == "WMA"
+        ma := ta.wma(src, length)
+        ma
+    if ma_select == "HMA"
+        ma := ta.hma(src,length)
+        ma
+    if ma_select == "JMA"
+        beta = 0.45*(length-1)/(0.45*(length-1)+2)
+        alpha = beta
+        tmp0 = 0.0, tmp1 = 0.0, tmp2 = 0.0, tmp3 = 0.0, tmp4 = 0.0
+        tmp0 := (1-alpha)*src + alpha*nz(tmp0[1])
+        tmp1 := (src - tmp0[0])*(1-beta) + beta*nz(tmp1[1])
+        tmp2 := tmp0[0] + tmp1[0]
+        tmp3 := (tmp2[0] - nz(tmp4[1]))*((1-alpha)*(1-alpha)) + (alpha*alpha)*nz(tmp3[1])
+        tmp4 := nz(tmp4[1]) + tmp3[0]
+        ma := tmp4
+        ma
+    if ma_select == "KAMA"
+        momentum = math.abs(ta.change(src, length))
+        volatility = math.sum(math.abs(ta.change(src)), length)
+        efficiencyRatio = volatility != 0 ? momentum / volatility : 0
+        smoothingConstant = math.pow((efficiencyRatio * (fastAlpha - slowAlpha)) + slowAlpha, 2)
+        var kama = 0.0
+        kama := nz(kama[1], src) + smoothingConstant * (src - nz(kama[1], src))
+        ma:=kama
+        ma
+    ma
+var plot_color=#353535
+var int current_sig = 0
+val=MA_selector(rsi_val,ma_length)
+
+if smoothRsi < os or smoothRsi[1] < os
+    output_long1 := 1
+
+if smoothRsi > ersi or smoothRsi[1] > ersi
+    output_short1 := 1
+
+output_long2 = val < 0
+output_short2 = val > 0
+
+len = input.int(14, minval=1, title="RSI Length")
+ob2 = input.int(defval=70, title="Overbought", minval=0, maxval=100)
+os2 = input.int(defval=30, title="Oversold", minval=0, maxval=100)
+
+// RSI code
+rsi2 = ta.rsi(close, len)
+// band1 = hline(ob2)
+// band0 = hline(os2)
+// plot(rsi2, color=(rsi > ob2 or rsi < os2 ? color.new(color.red, 0) : color.new(color.black, 0)))
+// fill(band1, band0, color=color.new(color.purple, 97))
+
+// DIVS code
+piv = input.bool(false,"Hide pivots?")
+shrt = input.bool(false,"Shorter labels?")
+hidel = input.bool(false, "Hide labels and color background")
+xbars = input.int(defval=90, title="Div lookback period (bars)?", minval=1)
+hb = math.abs(ta.highestbars(rsi2, xbars)) // Finds bar with highest value in last X bars
+lb = math.abs(ta.lowestbars(rsi2, xbars)) // Finds bar with lowest value in last X bars
+
+// Defining variable values, mandatory in Pine 3
+max = float(na)
+max_rsi = float(na)
+min = float(na)
+min_rsi = float(na)
+pivoth = bool(na)
+pivotl = bool(na)
+divbear = bool(na)
+divbull = bool(na)
+
+// If bar with lowest / highest is current bar, use it's value
+max := hb == 0 ? close : na(max[1]) ? close : max[1]
+max_rsi := hb == 0 ? rsi2 : na(max_rsi[1]) ? rsi2 : max_rsi[1]
+min := lb == 0 ? close : na(min[1]) ? close : min[1]
+min_rsi := lb == 0 ? rsi2 : na(min_rsi[1]) ? rsi2 : min_rsi[1]
+
+// Compare high of current bar being examined with previous bar's high
+// If curr bar high is higher than the max bar high in the lookback window range
+if close > max // we have a new high
+    max := close // change variable "max" to use current bar's high value
+if rsi2 > max_rsi // we have a new high
+    max_rsi := rsi2 // change variable "max_rsi" to use current bar's RSI value
+if close < min // we have a new low
+    min := close // change variable "min" to use current bar's low value
+if rsi2 < min_rsi // we have a new low
+    min_rsi := rsi2 // change variable "min_rsi" to use current bar's RSI value
+
+// Finds pivot point with at least 2 right candles with lower value
+pivoth := (max_rsi == max_rsi[2]) and (max_rsi[2] != max_rsi[3]) ? true : na
+pivotl := (min_rsi == min_rsi[2]) and (min_rsi[2] != min_rsi[3]) ? true : na
+
+// Detects divergences between price and indicator with 1 candle delay so it filters out repeating divergences
+if (max[1] > max[2]) and (rsi[1] < max_rsi) and (rsi <= rsi[1])
+    divbear := true
+if (min[1] < min[2]) and (rsi[1] > min_rsi) and (rsi >= rsi[1])
+    divbull := true
+
+
+output_long3 = divbull or pivotl
+output_short3 = divbear or pivoth
+
+fast_length = input.int(title="Fast Length", defval=12)
+slow_length = input.int(title="Slow Length", defval=26)
+src2 = input.source(title="Source", defval=close)
+signal_length = input.int(title="Signal Smoothing", minval = 1, maxval = 50, defval = 9)
+sma_source = input.string(title="Oscillator MA Type", defval="EMA", options=["SMA", "EMA"])
+sma_signal = input.string(title="Signal Line MA Type", defval="EMA", options=["SMA", "EMA"])
+// Plot colors
+col_macd = input.color(#2962FF, "MACD Line  ", group="Color Settings", inline="MACD")
+col_signal = input.color(#FF6D00, "Signal Line  ", group="Color Settings", inline="Signal")
+col_grow_above = input.color(#26A69A, "Above   Grow", group="Histogram", inline="Above")
+col_fall_above = input.color(#B2DFDB, "Fall", group="Histogram", inline="Above")
+col_grow_below = input.color(#FFCDD2, "Below Grow", group="Histogram", inline="Below")
+col_fall_below = input.color(#FF5252, "Fall", group="Histogram", inline="Below")
+// Calculating
+fast_ma = sma_source == "SMA" ? ta.sma(src2, fast_length) : ta.ema(src2, fast_length)
+slow_ma = sma_source == "SMA" ? ta.sma(src2, slow_length) : ta.ema(src2, slow_length)
+macd = fast_ma - slow_ma
+signal = sma_signal == "SMA" ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+hist = macd - signal
+// plot(hist, title="Histogram", style=plot.style_columns, color=(hist>=0 ? (hist[1] < hist ? col_grow_above : col_fall_above) : (hist[1] < hist ? col_grow_below : col_fall_below)))
+// plot(macd, title="MACD", color=col_macd)
+// plot(signal, title="Signal", color=col_signal)
+
+type DiverPoint
+	int bar_index
+	float hist
+	float price
+
+window_size = input.int(200, title = "Detect window size")
+pivot_length = input.int(5, title = "Pivot length")
+	
+var pivots_high = array.new<DiverPoint>()
+var pivots_low = array.new<DiverPoint>()
+
+if pivots_high.size() >= 2
+	previous = pivots_high.get(0)
+	new_pivots = array.new<DiverPoint>(1, previous)
+	
+	for i = 1 to pivots_high.size() - 1
+		current = pivots_high.get(i)
+		if current.hist <= previous.hist
+			break
+
+		previous := current
+		new_pivots.push(current)
+
+	pivots_high := new_pivots
+
+if pivots_low.size() >= 2
+	previous = pivots_low.get(0)
+	new_pivots = array.new<DiverPoint>(1, previous)
+	
+	for i = 1 to pivots_low.size() - 1
+		current = pivots_low.get(i)
+		if current.hist >= previous.hist
+			break
+
+		previous := current
+		new_pivots.push(current)
+
+	pivots_low := new_pivots
+
+
+ph = ta.pivothigh(hist, pivot_length, pivot_length)
+pl = ta.pivotlow(hist, pivot_length, pivot_length)
+
+if ph and ph > 0
+	pivots_high.unshift(DiverPoint.new(bar_index[pivot_length], ph, high[pivot_length]))
+	//label.new(bar_index[pivot_length], ph, style = label.style_label_down, color = color.red)
+
+if pl and pl < 0
+	pivots_low.unshift(DiverPoint.new(bar_index[pivot_length], pl, low[pivot_length]))
+	//label.new(bar_index[pivot_length], pl, style = label.style_label_up, color = color.green)
+
+draw_diver(a, b) =>
+    line.new(bar_index, na, bar_index, na) 
+	// line.new(a.bar_index, a.hist, b.bar_index, b.hist)
+
+check_diver(a, b) =>
+	(a.hist > b.hist and a.price < b.price) or (a.hist < b.hist and a.price > b.price)
+
+output_long4 = false
+output_short4 = false
+
+if hist[2] < hist[1] and hist < hist[1] and hist[1] > 0 and pivots_high.size() >= 1 // searching short
+	current = DiverPoint.new(bar_index[1], hist[1], high)
+	for i = 0 to pivots_high.size() - 1
+		if check_diver(current, pivots_high.get(i))
+			draw_diver(current, pivots_high.get(i))
+			output_short4 := true
+			break
+		
+
+if hist[2] > hist[1] and hist > hist[1] and hist[1] < 0 and pivots_low.size() >= 1 // searching long
+	current = DiverPoint.new(bar_index[1], hist[1], low)
+	for i = 0 to pivots_low.size() - 1
+		if check_diver(current, pivots_low.get(i))
+			draw_diver(current, pivots_low.get(i))
+			output_long4 := true
+			break
+
+to_int(a) => a ? 1 : 0        
+
+short_total = to_int(output_short1) + to_int(output_short2) + to_int(output_short3) + to_int(output_short4)   
+long_total = to_int(output_long1) + to_int(output_long2) + to_int(output_long3) + to_int(output_long4)    
+
+long_signal_color = input.color(color.lime, title = "Long color")
+short_signal_color = input.color(color.red, title = "Short color")
+
+
+
+bgcolor(short_total == 4 ? color.new(short_signal_color, short_total == 4 ? 10 : 50) : na, offset = -1)
+bgcolor(long_total == 4 ? color.new(long_signal_color, long_total == 4 ? 10 : 50) : na, offset = -1)
+
+if long_total == 3
+    label.new(bar_index - 1, na, yloc = yloc.belowbar, style = label.style_xcross, color = long_signal_color, size = size.tiny)
+
+if short_total == 3
+    label.new(bar_index - 1, na, yloc = yloc.abovebar, style = label.style_xcross, color = short_signal_color, size = size.tiny)
+
+alertcondition(long_total == 4, title = "4/4 LONG")
+alertcondition(short_total == 4, title = "4/4 SHORT")
+
+alertcondition(long_total == 3, title = "3/4 LONG")
+alertcondition(short_total == 3, title = "3/4 SHORT")
